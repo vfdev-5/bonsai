@@ -1,11 +1,13 @@
 from dataclasses import dataclass
 from functools import partial
-from typing import Sequence
+from typing import Any, Sequence
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import nnx
+from flax.nnx.nn import dtypes
+from flax.typing import Dtype
 
 
 @dataclass
@@ -18,41 +20,47 @@ class ModelConfig:
     patch_size: tuple[int, int] = (4, 4)
     layernorm_eps: float = 1e-12
     layer_scale_init_value: float = 1e-6
+    dtype: Dtype | None = None  # activations dtype
+    param_dtype: Dtype = jnp.float32  # parameters dtype
 
     @classmethod
-    def convnext_tiny_224(cls, *, drop_path_rate: float = 0.0, num_classes: int = 1000):
+    def convnext_tiny_224(cls, *, drop_path_rate: float = 0.0, num_classes: int = 1000, **kwargs: Any):
         return cls(
             stage_depths=(3, 3, 9, 3),
             stage_dims=(96, 192, 384, 768),
             drop_path_rate=drop_path_rate,
             num_classes=num_classes,
+            **kwargs,
         )
 
     @classmethod
-    def convnext_small_224(cls, *, drop_path_rate: float = 0.0, num_classes: int = 1000):
+    def convnext_small_224(cls, *, drop_path_rate: float = 0.0, num_classes: int = 1000, **kwargs: Any):
         return cls(
             stage_depths=(3, 3, 27, 3),
             stage_dims=(96, 192, 384, 768),
             drop_path_rate=drop_path_rate,
             num_classes=num_classes,
+            **kwargs,
         )
 
     @classmethod
-    def convnext_base_224(cls, *, drop_path_rate: float = 0.0, num_classes: int = 1000):
+    def convnext_base_224(cls, *, drop_path_rate: float = 0.0, num_classes: int = 1000, **kwargs: Any):
         return cls(
             stage_depths=(3, 3, 27, 3),
             stage_dims=(128, 256, 512, 1024),
             drop_path_rate=drop_path_rate,
             num_classes=num_classes,
+            **kwargs,
         )
 
     @classmethod
-    def convnext_large_224(cls, *, drop_path_rate: float = 0.0, num_classes: int = 1000):
+    def convnext_large_224(cls, *, drop_path_rate: float = 0.0, num_classes: int = 1000, **kwargs: Any):
         return cls(
             stage_depths=(3, 3, 27, 3),
             stage_dims=(192, 384, 768, 1536),
             drop_path_rate=drop_path_rate,
             num_classes=num_classes,
+            **kwargs,
         )
 
 
@@ -60,22 +68,31 @@ def drop_path(x: jax.Array, drop_prob: float, *, rngs: jax.Array, train: bool):
     if drop_prob < 1e-8 or not train:
         return x
 
-    keep_prob = jnp.asarray(1.0) - drop_prob
+    keep_prob = 1.0 - drop_prob
     shape = (x.shape[0],) + (1,) * (x.ndim - 1)
     mask = jax.random.bernoulli(rngs, p=keep_prob, shape=shape)
-    return (x * mask) / keep_prob
+    # cast keep_prob from np.float64 to python float to avoid output's dtype promotion
+    return (x * mask) / float(keep_prob)
 
 
 class Block(nnx.Module):
     def __init__(self, cfg: ModelConfig, stage_idx: int, drop_path_rate: float, *, rngs: nnx.Rngs):
-        dim = cfg.stage_dims[stage_idx]
-        self.dwconv = nnx.Conv(dim, dim, (7, 7), padding=(3, 3), feature_group_count=dim, rngs=rngs)
-        self.norm = nnx.LayerNorm(dim, epsilon=cfg.layernorm_eps, rngs=rngs)
-        self.pwconv1 = nnx.Linear(dim, 4 * dim, rngs=rngs)
-        self.pwconv2 = nnx.Linear(4 * dim, dim, rngs=rngs)
+        mixed_precision = {"dtype": cfg.dtype, "param_dtype": cfg.param_dtype}
 
-        self.gamma = nnx.Param(cfg.layer_scale_init_value * jnp.ones((dim))) if cfg.layer_scale_init_value > 0 else None
+        dim = cfg.stage_dims[stage_idx]
+        self.dwconv = nnx.Conv(
+            dim, dim, (7, 7), padding=(3, 3), feature_group_count=dim, rngs=rngs, **mixed_precision
+        )
+        self.norm = nnx.LayerNorm(dim, epsilon=cfg.layernorm_eps, rngs=rngs, **mixed_precision)
+        self.pwconv1 = nnx.Linear(dim, 4 * dim, rngs=rngs, **mixed_precision)
+        self.pwconv2 = nnx.Linear(4 * dim, dim, rngs=rngs, **mixed_precision)
+
+        self.gamma = nnx.Param(
+            cfg.layer_scale_init_value * jnp.ones((dim), dtype=cfg.param_dtype)
+        ) if cfg.layer_scale_init_value > 0 else None
         self.drop_path_rate = drop_path_rate
+        self.dtype = cfg.dtype
+        self.param_dtype = cfg.param_dtype
 
     def __call__(self, x: jax.Array, *, rngs: jax.Array, train: bool):
         res = x
@@ -84,9 +101,11 @@ class Block(nnx.Module):
         x = self.pwconv2(x)
 
         if self.gamma is not None:
-            x = self.gamma.value * x
+            x, gamma = dtypes.promote_dtype((x, self.gamma.value), dtype=self.dtype)
+            x = gamma * x
 
-        return res + drop_path(x, self.drop_path_rate, rngs=rngs, train=train)
+        x = drop_path(x, self.drop_path_rate, rngs=rngs, train=train)
+        return res + x
 
 
 class Stage(nnx.Module):
@@ -95,10 +114,16 @@ class Stage(nnx.Module):
         out_ch = cfg.stage_dims[stage_idx]
         s = 2 if stage_idx > 0 else 1
 
+        mixed_precision = {"dtype": cfg.dtype, "param_dtype": cfg.param_dtype}
+
         self.downsample_layers = nnx.List()
         if in_ch != out_ch or s > 1:
-            self.downsample_layers.append(nnx.LayerNorm(in_ch, epsilon=cfg.layernorm_eps, rngs=rngs))
-            self.downsample_layers.append(nnx.Conv(in_ch, out_ch, kernel_size=(2, 2), strides=(s, s), rngs=rngs))
+            self.downsample_layers.append(nnx.LayerNorm(
+                in_ch, epsilon=cfg.layernorm_eps, rngs=rngs, **mixed_precision
+            ))
+            self.downsample_layers.append(nnx.Conv(
+                in_ch, out_ch, kernel_size=(2, 2), strides=(s, s), rngs=rngs, **mixed_precision
+            ))
 
         self.layers = nnx.List(
             [Block(cfg, stage_idx, drop_path_rates[i], rngs=rngs) for i in range(cfg.stage_depths[stage_idx])]
@@ -119,17 +144,29 @@ class ConvNeXt(nnx.Module):
         *,
         rngs: nnx.Rngs,
     ):
+        mixed_precision = {"dtype": cfg.dtype, "param_dtype": cfg.param_dtype}
         self.embedding_layer = nnx.Sequential(
-            nnx.Conv(cfg.in_channels, cfg.stage_dims[0], cfg.patch_size, cfg.patch_size, rngs=rngs),
-            nnx.LayerNorm(cfg.stage_dims[0], epsilon=cfg.layernorm_eps, rngs=rngs),
+            nnx.Conv(
+                cfg.in_channels,
+                cfg.stage_dims[0],
+                cfg.patch_size,
+                cfg.patch_size,
+                rngs=rngs,
+                **mixed_precision,
+            ),
+            nnx.LayerNorm(
+                cfg.stage_dims[0], epsilon=cfg.layernorm_eps, rngs=rngs, **mixed_precision
+            ),
         )
 
         splits = np.cumsum(cfg.stage_depths)
         dp_rates = np.split(np.linspace(0, cfg.drop_path_rate, splits[-1]), splits[:-1])
         self.stages = nnx.List([Stage(cfg, i, dpr, rngs=rngs) for i, dpr in enumerate(dp_rates)])
 
-        self.norm = nnx.LayerNorm(cfg.stage_dims[-1], epsilon=cfg.layernorm_eps, rngs=rngs)
-        self.head = nnx.Linear(cfg.stage_dims[-1], cfg.num_classes, rngs=rngs)
+        self.norm = nnx.LayerNorm(
+            cfg.stage_dims[-1], epsilon=cfg.layernorm_eps, rngs=rngs, **mixed_precision
+        )
+        self.head = nnx.Linear(cfg.stage_dims[-1], cfg.num_classes, rngs=rngs, **mixed_precision)
 
     def __call__(self, x: jax.Array, *, rngs: jax.Array, train: bool = False):
         """x is a batch of images of shape (B, H, W, C)"""
