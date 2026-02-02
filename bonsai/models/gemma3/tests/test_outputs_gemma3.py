@@ -63,9 +63,9 @@ class TestModuleForwardPasses(absltest.TestCase):
         cls.bonsai_model = params.create_gemma3_from_pretrained(model_ckpt_path, cls.bonsai_config, mesh=cls.mesh)
 
     def _upgrade_dtypes(self):
-        self.bonsai_model.embed_tokens.weight.embedding[...] = self.bonsai_model.embed_tokens.weight.embedding[
-            ...
-        ].astype(jnp.float32)
+        self.bonsai_model.embed_tokens.weight.embedding.set_value(
+            self.bonsai_model.embed_tokens.weight.embedding[...].astype(jnp.float32)
+        )
         return
 
     def _make_torch_input(self):
@@ -393,7 +393,7 @@ class TestModuleForwardPasses(absltest.TestCase):
         rt = self.bonsai_config.text_config.rope_slide_theta
         js, jc = modeling._generate_pos_embeddings(jp, dim, rope_theta=rt, factor=1.0)
         rot_emb = self.torch_model.model.language_model.rotary_emb_local
-        tc, ts = rot_emb(hidden_states, torch.from_numpy(np.asarray(jp)))
+        tc, ts = rot_emb(hidden_states, torch.from_numpy(np.asarray(jp).copy()))
         tc, ts = tc[:, :, : dim // 2], ts[:, :, : dim // 2]
         np.testing.assert_allclose(js, ts.detach().cpu().numpy(), rtol=1e-5, atol=1e-5)
         np.testing.assert_allclose(jc, tc.detach().cpu().numpy(), rtol=1e-5, atol=1e-5)
@@ -402,7 +402,7 @@ class TestModuleForwardPasses(absltest.TestCase):
         rt = self.bonsai_config.text_config.rope_full_theta
         js, jc = modeling._generate_pos_embeddings(jp, dim, rope_theta=rt, factor=8.0)
         rot_emb = self.torch_model.model.language_model.rotary_emb
-        tc, ts = rot_emb(hidden_states, torch.from_numpy(np.asarray(jp)))
+        tc, ts = rot_emb(hidden_states, torch.from_numpy(np.asarray(jp).copy()))
         tc, ts = tc[:, :, : dim // 2], ts[:, :, : dim // 2]
         np.testing.assert_allclose(js, ts.detach().cpu().numpy(), rtol=1e-5, atol=1e-5)
         np.testing.assert_allclose(jc, tc.detach().cpu().numpy(), rtol=1e-5, atol=1e-5)

@@ -247,7 +247,7 @@ class ModelConfig:
 
     @classmethod
     def gemma3_4b_it(cls, use_fsdp: bool = False, use_tp: bool = False, *, norm_dtype: jnp.dtype):
-        shd_cfg = ShardingCfg.no_sharding() if use_tp is None else ShardingCfg.default(use_tp)
+        shd_cfg = ShardingCfg.no_sharding() if not (use_fsdp and use_tp) else ShardingCfg.default(use_tp)
         return cls(
             vision_config=VisionConfig.gemma3_4b_it(use_fsdp, use_tp),
             text_config=TextConfig.gemma3_4b_it(use_fsdp, use_tp, norm_dtype=norm_dtype),
@@ -345,9 +345,9 @@ class SiglipVisionEmbeddings(nnx.Module):
         self.position_embedding = ShardedEmbedding(self.num_patches, config.hidden_size, embedding_init=ei, rngs=rngs)
 
         self.position_ids = jnp.expand_dims(jnp.arange(self.num_patches), 0)
-        if config.shd_cfg.activation is not None:
-            shd = P(config.shd_cfg.activation[0])
-            self.position_ids = jax.device_put(self.position_ids, shd)
+        # if config.shd_cfg.activation is not None:
+        #     shd = P(config.shd_cfg.activation[0])
+        #     self.position_ids = jax.device_put(self.position_ids, shd)
 
     def __call__(self, pixel_values: Array):
         patch_embeds = self.patch_embedding(pixel_values)
@@ -652,7 +652,7 @@ class Gemma3Attention(nnx.Module):
 
         # Apply rope
         left_pads = count_left_pads(segment_ids)
-        cache.start_ind[...] = jnp.where(cache.start_ind[...] < 0, left_pads, cache.start_ind[...])
+        cache.start_ind.set_value(jnp.where(cache.start_ind[...] < 0, left_pads, cache.start_ind[...]))
         position_ids = compute_positions_from_segment_ids(segment_ids) + cache.cur_ind[...]
         sin, cos = _generate_pos_embeddings(position_ids, self.head_dim, self.rope_theta, factor=self.factor)
         q = apply_rope(q, sin, cos)
@@ -660,8 +660,8 @@ class Gemma3Attention(nnx.Module):
 
         # Update cache
         slice_indices = (0, cache.cur_ind[...], 0, 0)
-        cache.k_cache[...] = jax.lax.dynamic_update_slice(cache.k_cache[...], k, slice_indices)
-        cache.v_cache[...] = jax.lax.dynamic_update_slice(cache.v_cache[...], v, slice_indices)
+        cache.k_cache.set_value(jax.lax.dynamic_update_slice(cache.k_cache[...], k, slice_indices))
+        cache.v_cache.set_value(jax.lax.dynamic_update_slice(cache.v_cache[...], v, slice_indices))
 
         k, v = repeat_kv(cache.k_cache[...], self.n_rep), repeat_kv(cache.v_cache[...], self.n_rep)
         intermediate_shd = self.config.shd_cfg.attn_qk_activation
@@ -669,7 +669,7 @@ class Gemma3Attention(nnx.Module):
             q, k, v, mask=mask, scale=self.scale, attn_logit_sharding=intermediate_shd, out_sharding=shd
         )
         t = x.shape[1]
-        cache.cur_ind[...] = cache.cur_ind[...] + t
+        cache.cur_ind.set_value(cache.cur_ind[...] + t)
         return self.o_proj(qkv.reshape(*x.shape[:-1], -1), out_sharding=shd)
 
 

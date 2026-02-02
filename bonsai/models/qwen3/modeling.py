@@ -14,6 +14,7 @@
 
 import dataclasses
 import math
+from enum import Enum
 from functools import partial
 from typing import TypeAlias
 
@@ -25,54 +26,47 @@ from jax.sharding import PartitionSpec, get_abstract_mesh, reshard
 from jaxtyping import Array, ArrayLike
 
 _K_MASK = jnp.finfo(jnp.bfloat16).min
-ShardingSpec = PartitionSpec
+
+
+class ShardMode(Enum):
+    FSDP = "fsdp"
+    TP = "tp"
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class ShardingCfg:
-    emb_vd: ShardingSpec
-    emb_dv: ShardingSpec
-    q_weight_ndh: ShardingSpec
-    kv_weight_ndh: ShardingSpec
-    o_weight_nhd: ShardingSpec
-    ffw_weight_df: ShardingSpec
-    ffw_weight_fd: ShardingSpec
-    rms_norm: ShardingSpec
-    act_btd: ShardingSpec
-    act_btf: ShardingSpec
-    act_btnh: ShardingSpec
+    emb_vd: PartitionSpec | None = None
+    emb_dv: PartitionSpec | None = None
+    q_weight_ndh: PartitionSpec | None = None
+    kv_weight_ndh: PartitionSpec | None = None
+    o_weight_nhd: PartitionSpec | None = None
+    ffw_weight_df: PartitionSpec | None = None
+    ffw_weight_fd: PartitionSpec | None = None
+    rms_norm: PartitionSpec | None = None
+    act_btd: PartitionSpec | None = None
+    act_btf: PartitionSpec | None = None
+    act_btnh: PartitionSpec | None = None
 
     @staticmethod
     def no_sharding():
-        """Configuration with no sharding (all None)."""
-        return ShardingCfg(
-            emb_vd=P(None, None),
-            emb_dv=P(None, None),
-            q_weight_ndh=P(None, None, None),
-            kv_weight_ndh=P(None, None, None),
-            o_weight_nhd=P(None, None, None),
-            ffw_weight_df=P(None, None),
-            ffw_weight_fd=P(None, None),
-            rms_norm=P(None),
-            act_btd=P(None, None, None),
-            act_btf=P(None, None, None),
-            act_btnh=P(None, None, None, None),
-        )
+        return ShardingCfg()
 
     @staticmethod
-    def default():
+    def default(use_fsdp: bool, use_tp: bool):
+        fsdp = ShardMode.FSDP.value if use_fsdp else None
+        tp = ShardMode.TP.value if use_tp else None
         return ShardingCfg(
-            emb_vd=P("tp", "fsdp"),
-            emb_dv=P("fsdp", "tp"),
-            q_weight_ndh=P("tp", "fsdp", None),
-            kv_weight_ndh=P("tp", "fsdp", None),
-            o_weight_nhd=P("tp", None, "fsdp"),
-            ffw_weight_df=P("fsdp", "tp"),
-            ffw_weight_fd=P("tp", "fsdp"),
-            rms_norm=P("tp"),
-            act_btd=P("fsdp", None, "tp"),
-            act_btf=P("fsdp", None, "tp"),
-            act_btnh=P("fsdp", None, "tp", None),
+            emb_vd=P(tp, fsdp),
+            emb_dv=P(fsdp, tp),
+            q_weight_ndh=P(tp, fsdp, None),
+            kv_weight_ndh=P(tp, fsdp, None),
+            o_weight_nhd=P(tp, None, fsdp),
+            ffw_weight_df=P(fsdp, tp),
+            ffw_weight_fd=P(tp, fsdp),
+            rms_norm=P(tp),
+            act_btd=P(fsdp, None, tp),
+            act_btf=P(fsdp, None, tp),
+            act_btnh=P(fsdp, None, tp, None),
         )
 
 
@@ -90,18 +84,19 @@ class ModelConfig:
     local_rope_theta: float
     norm_eps: float
     tie_word_embeddings: bool
-    shd_cfg: ShardingCfg = ShardingCfg.no_sharding()
+    shd_cfg: ShardingCfg
 
     @classmethod
-    def _from_param(cls, use_sharding: bool, **kwargs):
-        if use_sharding:
-            kwargs["shd_cfg"] = ShardingCfg.default()
+    def _from_param(cls, use_fsdp: bool = False, use_tp: bool = False, **kwargs):
+        if not (use_fsdp and use_tp):
+            kwargs["shd_cfg"] = ShardingCfg.no_sharding()
+        else:
+            kwargs["shd_cfg"] = ShardingCfg.default(use_fsdp=use_fsdp, use_tp=use_tp)
         return cls(**kwargs)
 
     @classmethod
-    def qwen3_0_6b(cls, use_sharding: bool = False):  # qwen3-0.6B
+    def qwen3_0_6b(cls, use_fsdp: bool = False, use_tp: bool = False):  # qwen3-0.6B
         return cls._from_param(
-            use_sharding,
             num_layers=28,
             vocab_size=151936,
             emb_dim=1024,
@@ -114,12 +109,13 @@ class ModelConfig:
             rope_scaling_factor=8.0,
             local_rope_theta=1e4,
             tie_word_embeddings=True,
+            use_fsdp=use_fsdp,
+            use_tp=use_tp
         )
 
     @classmethod
-    def qwen3_1_7b(cls, use_sharding: bool = False):  # qwen3-1.7B
+    def qwen3_1_7b(cls, use_fsdp: bool = False, use_tp: bool = False):  # qwen3-1.7B
         return cls._from_param(
-            use_sharding,
             num_layers=28,
             vocab_size=151936,
             emb_dim=2048,
@@ -132,12 +128,13 @@ class ModelConfig:
             rope_scaling_factor=8.0,
             local_rope_theta=1e4,
             tie_word_embeddings=True,
+            use_fsdp=use_fsdp,
+            use_tp=use_tp
         )
 
     @classmethod
-    def qwen3_4b(cls, use_sharding: bool = False):  # qwen3-4B
-        return cls._from_param(
-            use_sharding,
+    def qwen3_4b(cls, use_fsdp: bool = False, use_tp: bool = False):  # qwen3-4B
+        return cls(
             num_layers=36,
             vocab_size=151936,
             emb_dim=2560,
@@ -150,12 +147,13 @@ class ModelConfig:
             rope_scaling_factor=8.0,
             local_rope_theta=1e4,
             tie_word_embeddings=True,
+            use_fsdp=use_fsdp,
+            use_tp=use_tp,
         )
 
     @classmethod
-    def qwen3_8b(cls, use_sharding: bool = False):  # qwen3-8B
-        return cls._from_param(
-            use_sharding,
+    def qwen3_8b(cls, use_fsdp: bool = False, use_tp: bool = False):  # qwen3-8B
+        return cls(
             num_layers=36,
             vocab_size=151936,
             emb_dim=4096,
@@ -168,12 +166,13 @@ class ModelConfig:
             rope_scaling_factor=8.0,
             local_rope_theta=1e4,
             tie_word_embeddings=False,
+            use_fsdp=use_fsdp,
+            use_tp=use_tp,
         )
 
     @classmethod
-    def qwen3_14b(cls, use_sharding: bool = False):  # qwen3-14B
-        return cls._from_param(
-            use_sharding,
+    def qwen3_14b(cls, use_fsdp: bool = False, use_tp: bool = False):  # qwen3-14B
+        return cls(
             num_layers=40,
             vocab_size=151936,
             emb_dim=5120,
@@ -186,12 +185,14 @@ class ModelConfig:
             rope_scaling_factor=8.0,
             local_rope_theta=1e4,
             tie_word_embeddings=False,
+            use_fsdp=use_fsdp,
+            use_tp=use_tp,
         )
 
 
-def shard(x: jnp.ndarray, s: ShardingSpec):
+def shard(x: jnp.ndarray, s: PartitionSpec | None):
     mesh = get_abstract_mesh()
-    if not mesh.empty and len(mesh.axis_names) > 0:
+    if not mesh.empty and len(mesh.axis_names) > 0 and s is not None:
         return reshard(x, s)
     return x
 
@@ -199,26 +200,27 @@ def shard(x: jnp.ndarray, s: ShardingSpec):
 class LayerCache(nnx.Module):
     def __init__(self, cfg: ModelConfig, batch_size: int, cache_size: int, dtype: jnp.dtype):
         cache_shape = (batch_size, cache_size, cfg.num_kv_heads, cfg.head_dim)
-        self.k_cache = shard(nnx.Cache(jnp.zeros(cache_shape, dtype=dtype)), cfg.shd_cfg.act_btnh)
-        self.v_cache = shard(nnx.Cache(jnp.zeros(cache_shape, dtype=dtype)), cfg.shd_cfg.act_btnh)
+        kv_shd = cfg.shd_cfg.act_btnh
+        self.k_cache = nnx.Cache(jnp.zeros(cache_shape, dtype=dtype, out_sharding=kv_shd))
+        self.v_cache = nnx.Cache(jnp.zeros(cache_shape, dtype=dtype, out_sharding=kv_shd))
         self.size = self.k_cache.shape[1]
-        batch_sharding = P(cfg.shd_cfg.act_btnh[0]) if cfg.shd_cfg.act_btnh else P(None)
-        self.start_ind = shard(nnx.Variable(-1 * jnp.ones((batch_size,), dtype=jnp.int32)), batch_sharding)
-        self.cur_ind = nnx.Variable(jnp.zeros((), dtype=jnp.int32))  # scalar for compute efficiency.
+        start_ind_shd = None if kv_shd is None else P(kv_shd[0])
+        self.start_ind = nnx.Variable(-1 * jnp.ones((batch_size,), dtype=jnp.int32, out_sharding=start_ind_shd))
+        self.cur_ind = nnx.Variable(jnp.zeros((), dtype=jnp.int32))
 
 
 Cache: TypeAlias = list[LayerCache]
 
 
 class Einsum(nnx.Module):
-    def __init__(self, einsum_str: str, shape: tuple[int, ...], *, shd: ShardingSpec, rngs: nnx.Rngs):
+    def __init__(self, einsum_str: str, shape: tuple[int, ...], *, shd: PartitionSpec, rngs: nnx.Rngs):
         self.einsum_str = einsum_str
         self.shape = shape
-        self.w = shard(nnx.Param(nnx.initializers.normal()(rngs.params(), shape)), shd)
+        self.w = nnx.Param(nnx.initializers.normal()(rngs.params(), shape, out_sharding=shd))
 
     @jax.named_scope("einsum")
-    def __call__(self, x: ArrayLike) -> Array:
-        return jnp.einsum(self.einsum_str, x, self.w.value)
+    def __call__(self, x: ArrayLike, *, out_sharding=None) -> Array:
+        return jnp.einsum(self.einsum_str, x, self.w[...], out_sharding=out_sharding)
 
 
 def _generate_pos_embeddings(
@@ -243,14 +245,14 @@ def apply_rope(x: jax.Array, sin: jax.Array, cos: jax.Array) -> jax.Array:
 
 class RMSNorm(nnx.Module):
     def __init__(self, dim: int, cfg: ModelConfig, *, rngs: nnx.Rngs):
-        self.scale = shard(nnx.Param(nnx.initializers.ones_init()(rngs.params(), dim)), cfg.shd_cfg.rms_norm)
+        self.scale = nnx.Param(jax.nn.initializers.ones(rngs.params(), dim, out_sharding=cfg.shd_cfg.rms_norm))
         self.norm_eps = cfg.norm_eps
 
     @jax.named_scope("rms_norm")
     def __call__(self, x: Array) -> Array:
         dtype = x.dtype
-        rms = jnp.sqrt(jnp.mean(jnp.astype(x, jnp.float32) ** 2, axis=-1, keepdims=True) + self.norm_eps)
-        return jnp.astype(self.scale.value * x / rms, dtype)
+        inv_rms = jax.lax.rsqrt(jnp.mean(jnp.astype(x, jnp.float32) ** 2, axis=-1, keepdims=True) + self.norm_eps)
+        return jnp.astype(self.scale[...] * x * inv_rms, dtype)
 
 
 def count_left_pads(x: jax.Array) -> int:
@@ -293,35 +295,37 @@ class Attention(nnx.Module):
 
     @jax.named_scope("attention")
     def __call__(self, x: Array, cache: LayerCache | None, segment_ids: Array) -> Array:
-        query_proj = shard(self.q_norm(self.q_proj(x)), self.shd_cfg.act_btnh)  # [B, T, N, H]
-        key_proj = shard(self.k_norm(self.k_proj(x)), self.shd_cfg.act_btnh)  # [B, T, K, H]
-        value_proj = shard(self.v_proj(x), self.shd_cfg.act_btnh)  # [B, T, K, H]
+        shd = self.shd_cfg.act_btnh
+        query_proj = self.q_norm(self.q_proj(x, out_sharding=shd))  # [B, T, N, H]
+        key_proj = self.k_norm(self.k_proj(x, out_sharding=shd))  # [B, T, K, H]
+        value_proj = self.v_proj(x, out_sharding=shd)  # [B, T, K, H]
 
         # RoPE and Cache Logic
         left_pads = count_left_pads(segment_ids)
-        left_pads = shard(left_pads, P(self.shd_cfg.act_btnh[0]))
-        cache.start_ind.value = jnp.where(cache.start_ind.value < 0, left_pads, cache.start_ind.value)
-        position_ids = compute_positions_from_segment_ids(segment_ids) + cache.cur_ind.value
+        if self.shd_cfg.act_btnh is not None:
+            left_pads = shard(left_pads, P(self.shd_cfg.act_btnh[0]))
+        cache.start_ind.set_value(jnp.where(cache.start_ind[...] < 0, left_pads, cache.start_ind[...]))
+        position_ids = compute_positions_from_segment_ids(segment_ids) + cache.cur_ind[...]
         sin, cos = _generate_pos_embeddings(position_ids, self.head_dim)
         query_proj = apply_rope(query_proj, sin, cos)
         key_proj = apply_rope(key_proj, sin, cos)
 
         # Update K/V cache [B, S, K, H]
-        slice_indices = (0, cache.cur_ind.value, 0, 0)
-        cache.v_cache.value = jax.lax.dynamic_update_slice(cache.v_cache.value, value_proj, slice_indices)
-        cache.k_cache.value = jax.lax.dynamic_update_slice(cache.k_cache.value, key_proj, slice_indices)
+        slice_indices = (0, cache.cur_ind[...], 0, 0)
+        cache.v_cache.set_value(jax.lax.dynamic_update_slice(cache.v_cache[...], value_proj, slice_indices))
+        cache.k_cache.set_value(jax.lax.dynamic_update_slice(cache.k_cache[...], key_proj, slice_indices))
 
         b, t, n, h = query_proj.shape
 
         # GQA reshape and attention logits
         query_proj_gqa = query_proj.reshape((b, t, self.num_kv_heads, self.n_rep, h))
-        attn_logits = jnp.einsum("BTKGH,BSKH->BTSKG", query_proj_gqa, cache.k_cache.value) * self.scale
+        attn_logits = jnp.einsum("BTKGH,BSKH->BTSKG", query_proj_gqa, cache.k_cache[...]) * self.scale
 
         # Masking and Softmax
-        q_pos = cache.cur_ind.value + jnp.arange(t, dtype=jnp.int32)[None, :] - cache.start_ind.value[:, None]
+        q_pos = cache.cur_ind[...] + jnp.arange(t, dtype=jnp.int32)[None, :] - cache.start_ind[...][:, None]
         ts = jnp.arange(cache.size, dtype=jnp.int32)  # (cache.size,)
-        kv_segment_ids = (ts[None, :] >= cache.start_ind.value[:, None]) & (ts[None, :] < cache.cur_ind.value + t)
-        k_pos = ts[None, :] - cache.start_ind.value[:, None]  # (b, cache.size)
+        kv_segment_ids = (ts[None, :] >= cache.start_ind[...][:, None]) & (ts[None, :] < cache.cur_ind[...] + t)
+        k_pos = ts[None, :] - cache.start_ind[...][:, None]  # (b, cache.size)
         causal_mask = k_pos[:, None, :] <= q_pos[:, :, None]
         segment_mask = kv_segment_ids[:, None, :] == segment_ids[:, :, None]
         final_mask = causal_mask & segment_mask  # (B, T, S)
@@ -330,11 +334,11 @@ class Attention(nnx.Module):
 
         # Softmax
         attn_weights = jax.nn.softmax(attn_logits.astype(jnp.float32), axis=2).astype(attn_logits.dtype)
-        qkv = jnp.einsum("BTSKG,BSKH->BTKGH", attn_weights, cache.v_cache.value)
+        qkv = jnp.einsum("BTSKG,BSKH->BTKGH", attn_weights, cache.v_cache[...])
         qkv = qkv.reshape((b, t, n, h))
 
-        cache.cur_ind.value = cache.cur_ind.value + t
-        return shard(self.o_proj(qkv), self.shd_cfg.act_btd)
+        cache.cur_ind.set_value(cache.cur_ind[...] + t)
+        return self.o_proj(qkv, out_sharding=self.shd_cfg.act_btd)
 
     @property
     def head_dim(self):
@@ -353,15 +357,16 @@ class MLP(nnx.Module):
     def __init__(self, cfg: ModelConfig, *, rngs: nnx.Rngs):
         self.shd_cfg = cfg.shd_cfg
         linear = partial(nnx.Linear, use_bias=False, rngs=rngs)
+        # TODO: Replace with nnx.Linear once explicit sharding is supported.
         self.gate_proj = shard(linear(cfg.emb_dim, cfg.mlp_dim), self.shd_cfg.ffw_weight_df)
         self.up_proj = shard(linear(cfg.emb_dim, cfg.mlp_dim), self.shd_cfg.ffw_weight_df)
         self.down_proj = shard(linear(cfg.mlp_dim, cfg.emb_dim), self.shd_cfg.ffw_weight_fd)
 
     @jax.named_scope("feed_forward")
     def __call__(self, x: ArrayLike) -> Array:
-        activations = nnx.silu(self.gate_proj(x)) * self.up_proj(x)
-        activations = shard(activations, self.shd_cfg.act_btf)
-        outputs = self.down_proj(activations)
+        ux = self.up_proj(x, out_sharding=self.shd_cfg.act_btf)
+        gx = nnx.silu(self.gate_proj(x, out_sharding=self.shd_cfg.act_btf))
+        outputs = self.down_proj(gx * ux, out_sharding=self.shd_cfg.act_btf)
         return outputs
 
 
@@ -381,11 +386,12 @@ class DecoderLayer(nnx.Module):
 
 class Qwen3(nnx.Module):
     def __init__(self, cfg: ModelConfig, *, rngs: nnx.Rngs):
+        # TODO: Replace with nnx.Embed once explicit sharding is supported.
         self.embedder = shard(
             nnx.Embed(num_embeddings=cfg.vocab_size, features=cfg.emb_dim, dtype=jnp.bfloat16, rngs=rngs),
             cfg.shd_cfg.emb_vd,
         )
-        self.out_emb_shd = None if get_abstract_mesh().empty else cfg.shd_cfg.act_btd
+        self.out_emb_shd = cfg.shd_cfg.act_btd
         self.layers = nnx.List([DecoderLayer(cfg=cfg, rngs=rngs) for _ in range(cfg.num_layers)])
         self.final_norm = RMSNorm(cfg.emb_dim, cfg, rngs=rngs)
         self.lm_head = Einsum(
@@ -398,11 +404,11 @@ class Qwen3(nnx.Module):
         cache_size = 2 ** math.ceil(math.log2(max(token_len + generate_steps, 1)))  # Pad for a sharding-friendly size.
         return [LayerCache(cfg, batch_size, cache_size, dtype) for _ in range(cfg.num_layers)]
 
-    def __call__(self, tokens, segment_ids, cache, num_right_pads):
-        x = self.embedder.embedding.value.at[(tokens,)].get(out_sharding=self.out_emb_shd)
+    def __call__(self, tokens, segment_ids, cache):
+        x = self.embedder.embedding[...].at[(tokens,)].get(out_sharding=self.out_emb_shd)
         for i, layer in enumerate(self.layers):
             x = layer(x, cache[i], segment_ids)
-        logits = self.lm_head(self.final_norm(x))
+        logits = self.lm_head(self.final_norm(x), out_sharding=self.out_emb_shd)
         return logits
 
 
@@ -410,6 +416,6 @@ class Qwen3(nnx.Module):
 def forward(model: nnx.Module, cache: Cache, tokens: Array, pad_id: int) -> tuple[Array, nnx.Cache]:
     segment_ids = 1 * (tokens != pad_id)
     num_right_pads = count_right_pads(tokens, pad_id)
-    logits = model(tokens, segment_ids, cache, num_right_pads)
+    logits = model(tokens, segment_ids, cache)
     target_ind = tokens.shape[-1] - num_right_pads - 1
     return logits[:, target_ind], cache
