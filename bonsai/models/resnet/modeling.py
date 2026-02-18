@@ -136,6 +136,33 @@ class ResNet(nnx.Module):
         x = self.pool(x)
         return self.fc(x)
 
+    @classmethod
+    def from_pretrained(cls, model_name: str, config: ModelConfig | None = None):
+        """Load a pretrained ResNet model from HuggingFace Hub.
+
+        Args:
+            model_name: The model id of a pretrained model hosted on huggingface.co.
+                For example, "microsoft/resnet-50"
+            config: Optional model configuration. If None, will be inferred from model_name.
+
+        Returns:
+            A ResNet model instance with loaded pretrained weights.
+        """
+        from huggingface_hub import snapshot_download
+        from bonsai.models.resnet import params
+
+        if config is None:
+            config_map = {
+                "microsoft/resnet-50": ModelConfig.resnet50,
+                "microsoft/resnet-152": ModelConfig.resnet152,
+            }
+            if model_name not in config_map:
+                raise ValueError(f"Model name '{model_name}' is unknown, please provide config argument")
+            config = config_map[model_name]()
+
+        model_ckpt_path = snapshot_download(repo_id=model_name, allow_patterns="*.safetensors")
+        return params.create_resnet_from_pretrained(model_ckpt_path, config)
+
 
 @jax.jit
 def forward(model, x):
