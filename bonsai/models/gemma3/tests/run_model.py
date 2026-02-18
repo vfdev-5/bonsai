@@ -21,11 +21,10 @@ import jax.numpy as jnp
 import numpy as np
 import torch
 import tqdm
-from huggingface_hub import snapshot_download
 from jax.sharding import AxisType
 from transformers import Gemma3Processor
 
-from bonsai.models.gemma3 import modeling, params
+from bonsai.models.gemma3 import modeling
 from bonsai.utils import Sampler
 
 
@@ -68,16 +67,15 @@ def run_model():
     mesh = jax.make_mesh(((1, 1)), (fsdp, tp), axis_types=(AxisType.Explicit, AxisType.Explicit))
     jax.set_mesh(mesh)
 
-    model_ckpt_path = snapshot_download(model_name, token=access_token)
-
-    bonsai_config = modeling.ModelConfig.gemma3_4b_it(norm_dtype=jnp.float32)
-    bonsai_model = params.create_gemma3_from_pretrained(model_ckpt_path, bonsai_config)
+    # Load pretrained model using from_pretrained
+    bonsai_model = modeling.Gemma3Model.from_pretrained(model_name, norm_dtype=jnp.float32, access_token=access_token)
     eot_token_id = processor.tokenizer.convert_tokens_to_ids("<end_of_turn>")
 
     # Make inputs
     n_text, n_img, n_tti = make_input(processor)
     gen_steps = 256
     batch_size, num_tokens = n_text.shape
+    bonsai_config = modeling.ModelConfig.gemma3_4b_it(norm_dtype=jnp.float32)
     cache = modeling.init_cache(bonsai_config, batch_size, num_tokens, gen_steps, jnp.float32)
 
     source_key = jax.random.key(0)

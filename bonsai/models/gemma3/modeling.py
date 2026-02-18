@@ -853,6 +853,34 @@ class Gemma3Model(nnx.Module):
 
         return out
 
+    @classmethod
+    def from_pretrained(cls, model_name: str, config: ModelConfig | None = None, *, norm_dtype: jnp.dtype = jnp.float32, access_token: str | None = None):
+        """Load a pretrained Gemma3 model from HuggingFace Hub.
+
+        Args:
+            model_name: The model id of a pretrained model hosted on huggingface.co.
+                For example, "google/gemma-3-4b-it"
+            config: Optional model configuration. If None, will be inferred from model_name.
+            norm_dtype: Data type for normalization layers. Defaults to jnp.float32.
+            access_token: Optional HuggingFace access token for gated models.
+
+        Returns:
+            A Gemma3Model instance with loaded pretrained weights.
+        """
+        from huggingface_hub import snapshot_download
+        from bonsai.models.gemma3 import params
+
+        if config is None:
+            config_map = {
+                "google/gemma-3-4b-it": lambda: ModelConfig.gemma3_4b_it(norm_dtype=norm_dtype),
+            }
+            if model_name not in config_map:
+                raise ValueError(f"Model name '{model_name}' is unknown, please provide config argument")
+            config = config_map[model_name]()
+
+        model_ckpt_path = snapshot_download(repo_id=model_name, allow_patterns="*.safetensors", token=access_token)
+        return params.create_gemma3_from_pretrained(model_ckpt_path, config)
+
 
 @jax.jit
 def forward(

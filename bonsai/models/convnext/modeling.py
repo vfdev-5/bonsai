@@ -141,6 +141,35 @@ class ConvNeXt(nnx.Module):
         x = self.norm(x)
         return self.head(x)
 
+    @classmethod
+    def from_pretrained(cls, model_name: str, config: ModelConfig | None = None):
+        """Load a pretrained ConvNeXt model from HuggingFace Hub.
+
+        Args:
+            model_name: The model id of a pretrained model hosted on huggingface.co.
+                For example, "facebook/convnext-small-224"
+            config: Optional model configuration. If None, will be inferred from model_name.
+
+        Returns:
+            A ConvNeXt model instance with loaded pretrained weights.
+        """
+        from huggingface_hub import snapshot_download
+        from bonsai.models.convnext import params
+
+        if config is None:
+            config_map = {
+                "facebook/convnext-tiny-224": ModelConfig.convnext_tiny_224,
+                "facebook/convnext-small-224": ModelConfig.convnext_small_224,
+                "facebook/convnext-base-224": ModelConfig.convnext_base_224,
+                "facebook/convnext-large-224": ModelConfig.convnext_large_224,
+            }
+            if model_name not in config_map:
+                raise ValueError(f"Model name '{model_name}' is unknown, please provide config argument")
+            config = config_map[model_name]()
+
+        model_ckpt_path = snapshot_download(repo_id=model_name, allow_patterns="*.h5")
+        return params.create_convnext_from_pretrained(model_ckpt_path, config)
+
 
 @partial(jax.jit, static_argnames=["graph_def", "train"])
 def forward(
