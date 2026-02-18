@@ -75,8 +75,7 @@ def run_model():
     n_text, n_img, n_tti = make_input(processor)
     gen_steps = 256
     batch_size, num_tokens = n_text.shape
-    bonsai_config = modeling.ModelConfig.gemma3_4b_it(norm_dtype=jnp.float32)
-    cache = modeling.init_cache(bonsai_config, batch_size, num_tokens, gen_steps, jnp.float32)
+    cache = modeling.init_cache(bonsai_model.config, batch_size, num_tokens, gen_steps, jnp.float32)
 
     source_key = jax.random.key(0)
     sampler = jax.jit(Sampler(temperature=1.0, top_p=0.8, top_k=10))
