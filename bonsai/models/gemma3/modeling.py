@@ -854,7 +854,14 @@ class Gemma3Model(nnx.Module):
         return out
 
     @classmethod
-    def from_pretrained(cls, model_name: str, config: ModelConfig | None = None, *, norm_dtype: jnp.dtype = jnp.float32, access_token: str | None = None):
+    def from_pretrained(
+        cls,
+        model_name: str,
+        config: ModelConfig | None = None,
+        *,
+        norm_dtype: jnp.dtype = jnp.float32,
+        access_token: str | None = None,
+    ):
         """Load a pretrained Gemma3 model from HuggingFace Hub.
 
         Args:
